@@ -21,9 +21,11 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 
 import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
 import reactor.core.publisher.Mono;
 
 import org.springframework.data.redis.core.ReactiveRedisOperations;
@@ -33,8 +35,8 @@ import org.springframework.session.Session;
 import org.springframework.util.Assert;
 
 /**
- * A {@link ReactiveSessionRepository} that is implemented using Spring Data's
- * {@link ReactiveRedisOperations}.
+ * A {@link ReactiveSessionRepository} that is implemented using Spring Data's {@link
+ * ReactiveRedisOperations}.
  *
  * @author Vedran Pavic
  * @since 2.0
@@ -63,10 +65,9 @@ public class ReactiveRedisOperationsSessionRepository implements
 	static final String MAX_INACTIVE_INTERVAL_KEY = "maxInactiveInterval";
 
 	/**
-	 * The prefix of the key used for session attributes. The suffix is the name of
-	 * the session attribute. For example, if the session contained an attribute named
-	 * attributeName, then there would be an entry in the hash named
-	 * sessionAttr:attributeName that mapped to its value.
+	 * The prefix of the key used for session attributes. The suffix is the name of the session
+	 * attribute. For example, if the session contained an attribute named attributeName, then there
+	 * would be an entry in the hash named sessionAttr:attributeName that mapped to its value.
 	 */
 	static final String ATTRIBUTE_PREFIX = "sessionAttr:";
 
@@ -78,8 +79,8 @@ public class ReactiveRedisOperationsSessionRepository implements
 	private String namespace = DEFAULT_NAMESPACE + ":";
 
 	/**
-	 * If non-null, this value is used to override the default value for
-	 * {@link RedisSession#setMaxInactiveInterval(Duration)}.
+	 * If non-null, this value is used to override the default value for {@link
+	 * RedisSession#setMaxInactiveInterval(Duration)}.
 	 */
 	private Integer defaultMaxInactiveInterval;
 
@@ -97,12 +98,12 @@ public class ReactiveRedisOperationsSessionRepository implements
 	}
 
 	/**
-	 * Sets the maximum inactive interval in seconds between requests before newly created
-	 * sessions will be invalidated. A negative time indicates that the session will never
-	 * timeout. The default is 1800 (30 minutes).
+	 * Sets the maximum inactive interval in seconds between requests before newly created sessions
+	 * will be invalidated. A negative time indicates that the session will never timeout. The default
+	 * is 1800 (30 minutes).
 	 *
-	 * @param defaultMaxInactiveInterval the number of seconds that the {@link Session}
-	 * should be kept alive between client requests.
+	 * @param defaultMaxInactiveInterval the number of seconds that the {@link Session} should be kept
+	 * alive between client requests.
 	 */
 	public void setDefaultMaxInactiveInterval(int defaultMaxInactiveInterval) {
 		this.defaultMaxInactiveInterval = defaultMaxInactiveInterval;
@@ -120,6 +121,7 @@ public class ReactiveRedisOperationsSessionRepository implements
 
 	/**
 	 * Returns the {@link ReactiveRedisOperations} used for sessions.
+	 *
 	 * @return the {@link ReactiveRedisOperations} used for sessions
 	 * @since 2.1.0
 	 */
@@ -151,8 +153,7 @@ public class ReactiveRedisOperationsSessionRepository implements
 				});
 		if (session.isNew) {
 			return result;
-		}
-		else {
+		} else {
 			String sessionKey = getSessionKey(
 					session.hasChangedSessionId() ? session.originalSessionId
 							: session.getId());
@@ -194,10 +195,10 @@ public class ReactiveRedisOperationsSessionRepository implements
 	}
 
 	/**
-	 * A custom implementation of {@link Session} that uses a {@link MapSession} as the
-	 * basis for its mapping. It keeps track of any attributes that have changed. When
-	 * {@link RedisSession#saveDelta()} is invoked all the attributes that have been
-	 * changed will be persisted.
+	 * A custom implementation of {@link Session} that uses a {@link MapSession} as the basis for its
+	 * mapping. It keeps track of any attributes that have changed. When {@link
+	 * RedisSession#saveDelta()} is invoked all the attributes that have been changed will be
+	 * persisted.
 	 */
 	final class RedisSession implements Session {
 
@@ -210,8 +211,8 @@ public class ReactiveRedisOperationsSessionRepository implements
 		private String originalSessionId;
 
 		/**
-		 * Creates a new instance ensuring to mark all of the new attributes to be
-		 * persisted in the next save operation.
+		 * Creates a new instance ensuring to mark all of the new attributes to be persisted in the next
+		 * save operation.
 		 */
 		RedisSession() {
 			this(new MapSession());
@@ -220,14 +221,13 @@ public class ReactiveRedisOperationsSessionRepository implements
 					(int) getMaxInactiveInterval().getSeconds());
 			this.delta.put(LAST_ACCESSED_TIME_KEY, getLastAccessedTime().toEpochMilli());
 			this.isNew = true;
-			this.flushImmediateIfNecessary();
 		}
 
 		/**
 		 * Creates a new instance from the provided {@link MapSession}.
 		 *
-		 * @param mapSession the {@link MapSession} that represents the persisted session
-		 * that was retrieved. Cannot be null.
+		 * @param mapSession the {@link MapSession} that represents the persisted session that was
+		 * retrieved. Cannot be null.
 		 */
 		RedisSession(MapSession mapSession) {
 			Assert.notNull(mapSession, "mapSession cannot be null");
@@ -304,32 +304,42 @@ public class ReactiveRedisOperationsSessionRepository implements
 			return !getId().equals(this.originalSessionId);
 		}
 
-		private void flushImmediateIfNecessary() {
-			if (ReactiveRedisOperationsSessionRepository.this.redisFlushMode == RedisFlushMode.IMMEDIATE) {
-				saveDelta();
+		private void putAndFlush(String a, Object v) {
+			synchronized (this.delta) {
+				this.delta.put(a, v);
 			}
 		}
 
-		private void putAndFlush(String a, Object v) {
-			this.delta.put(a, v);
-			flushImmediateIfNecessary();
-		}
+		final Semaphore semaphore = new Semaphore(1);
 
 		private Mono<Void> saveDelta() {
-			if (this.delta.isEmpty()) {
-				return Mono.empty();
+			boolean acquire = semaphore.tryAcquire();
+			if (!acquire) {
+				throw new IllegalStateException("Only one save request is possible at a time.");
+			}
+
+			Map<String, Object> snapShot;
+			synchronized (this.delta) {
+				if (this.delta.isEmpty()) {
+					return Mono.empty();
+				}
+				snapShot = new HashMap<>(this.delta);
+				this.delta.clear();
 			}
 
 			String sessionKey = getSessionKey(getId());
-			Mono<Boolean> update = ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
-					.opsForHash().putAll(sessionKey, this.delta);
-			Mono<Boolean> setTtl = ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
-					.expire(sessionKey, getMaxInactiveInterval());
 
-			return update.and(setTtl).and((s) -> {
-				this.delta.clear();
-				s.onComplete();
-			}).then();
+			// Could work from time to time, depending on if the first call to saveDelta finishes first,
+			// otherwise the "old" state is persisted.
+			Mono<Boolean> update = Mono
+					.defer(() -> ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
+							.opsForHash().putAll(sessionKey, snapShot));
+			Mono<Boolean> setTtl = Mono
+					.defer(() -> ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
+							.expire(sessionKey, getMaxInactiveInterval()));
+
+			return update.and(setTtl).and(Subscriber::onComplete)
+					.doFinally(signalType -> semaphore.release());
 		}
 
 		private Mono<Void> saveChangeSessionId() {
@@ -346,13 +356,13 @@ public class ReactiveRedisOperationsSessionRepository implements
 
 			if (this.isNew) {
 				return Mono.from(replaceSessionId);
-			}
-			else {
+			} else {
 				String originalSessionKey = getSessionKey(this.originalSessionId);
 				String sessionKey = getSessionKey(sessionId);
 
-				return ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
-						.rename(originalSessionKey, sessionKey).and(replaceSessionId);
+				return Mono
+						.defer(() -> ReactiveRedisOperationsSessionRepository.this.sessionRedisOperations
+								.rename(originalSessionKey, sessionKey).and(replaceSessionId));
 			}
 		}
 

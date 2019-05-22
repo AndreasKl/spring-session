@@ -28,6 +28,7 @@ import org.springframework.session.data.redis.config.annotation.web.server.Enabl
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit4.SpringRunner;
 import org.springframework.test.context.web.WebAppConfiguration;
+import reactor.core.publisher.Mono;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -62,6 +63,35 @@ public class ReactiveRedisOperationsSessionRepositoryITests extends AbstractRedi
 		assertThat(session.getAttributeNames()).isEqualTo(toSave.getAttributeNames());
 		assertThat(session.<String>getAttribute(expectedAttributeName))
 				.isEqualTo(toSave.getAttribute(expectedAttributeName));
+
+		this.repository.deleteById(toSave.getId()).block();
+
+		assertThat(this.repository.findById(toSave.getId()).block()).isNull();
+	}
+
+	@Test
+	public void multipleSavesWork() {
+		ReactiveRedisOperationsSessionRepository.RedisSession toSave = this.repository
+				.createSession().block();
+
+		toSave.setAttribute("a", "b");
+
+		Mono<Void> firstSave = this.repository.save(toSave);
+
+		toSave.setAttribute("c", "d");
+
+		Mono<Void> secondSave = this.repository.save(toSave);
+
+		firstSave.then(secondSave).block();
+
+		Session session = this.repository.findById(toSave.getId()).block();
+
+		assertThat(session.getId()).isEqualTo(toSave.getId());
+		assertThat(session.getAttributeNames()).isEqualTo(toSave.getAttributeNames());
+		assertThat(session.<String>getAttribute("a"))
+				.isEqualTo(toSave.getAttribute("a"));
+		assertThat(session.<String>getAttribute("c"))
+				.isEqualTo(toSave.getAttribute("c"));
 
 		this.repository.deleteById(toSave.getId()).block();
 
